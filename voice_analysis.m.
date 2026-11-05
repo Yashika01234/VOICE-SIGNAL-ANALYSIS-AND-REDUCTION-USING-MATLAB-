@@ -1,0 +1,255 @@
+
+clc;
+clear;
+close all;
+
+%% VOICE ANALYSIS AND NOISE REDUCTION USING MATLAB DSP
+
+% Input audio must be in the same folder
+[x, fs] = audioread('noisy_voice.wav');
+
+%% 1. PREPROCESSING
+
+% Convert stereo to mono
+if size(x, 2) == 2
+    x = mean(x, 2);
+end
+
+% Normalize input
+x = x / (max(abs(x)) + eps);
+
+N = length(x);
+duration = N / fs;
+time = (0:N-1) / fs;
+
+fprintf('\n===== ORIGINAL VOICE ANALYSIS =====\n');
+fprintf('Sampling Frequency: %.0f Hz\n', fs);
+fprintf('Duration: %.2f seconds\n', duration);
+fprintf('Number of Samples: %d\n', N);
+
+%% 2. ORIGINAL VOICE ANALYSIS
+
+% Peak amplitude
+peakAmplitude = max(abs(x));
+
+% RMS amplitude
+rmsAmplitude = sqrt(mean(x.^2));
+
+% Zero Crossing Rate
+frameLength = round(0.03 * fs);
+hopLength = round(0.015 * fs);
+
+zcrOriginal = calculateZCR(x, frameLength, hopLength);
+
+fprintf('Peak Amplitude: %.4f\n', peakAmplitude);
+fprintf('RMS Amplitude: %.4f\n', rmsAmplitude);
+fprintf('Average ZCR: %.4f\n', mean(zcrOriginal));
+
+%% 3. FREQUENCY ANALYSIS
+
+nfft = 2^nextpow2(N);
+
+X = fft(x, nfft);
+
+frequency = (0:nfft/2) * fs / nfft;
+
+magnitude = abs(X(1:nfft/2+1));
+
+% Dominant frequency (excluding DC)
+[~, index] = max(magnitude(2:end));
+
+dominantFrequency = frequency(index + 1);
+
+% Spectral centroid
+spectralCentroid = sum(frequency(:) .* magnitude(:)) / ...
+                   (sum(magnitude) + eps);
+
+fprintf('Dominant Frequency: %.2f Hz\n', dominantFrequency);
+fprintf('Spectral Centroid: %.2f Hz\n', spectralCentroid);
+
+%% 4. BUTTERWORTH BANDPASS FILTER
+
+lowCutoff = 100;
+highCutoff = min(4000, 0.95 * (fs/2));
+
+if fs <= 1000
+    error('Use an audio recording with sampling rate above 1000 Hz.');
+end
+
+[b, a] = butter(4, ...
+    [lowCutoff highCutoff] / (fs/2), 'bandpass');
+
+filteredVoice = filtfilt(b, a, x);
+
+%% 5. SHORT TIME FOURIER TRANSFORM (STFT)
+
+winLength = 512;
+overlapLength = 384;
+fftLength = 512;
+
+win = hann(winLength, 'periodic');
+
+[S, F, T] = stft(filteredVoice, fs, ...
+    'Window', win, ...
+    'OverlapLength', overlapLength, ...
+    'FFTLength', fftLength);
+
+%% 6. SPECTRAL SUBTRACTION
+
+% IMPORTANT:
+% First 0.5 seconds of recording should contain
+% background noise without speech.
+
+noiseDuration = 0.5;
+
+noiseFrames = find(T <= noiseDuration);
+
+if isempty(noiseFrames)
+    error('Audio is too short for noise estimation.');
+end
+
+% Estimate average noise magnitude
+noiseProfile = mean(abs(S(:, noiseFrames)), 2);
+
+% Calculate magnitude and phase
+magnitudeSTFT = abs(S);
+phaseSTFT = angle(S);
+
+% Noise reduction parameters
+alpha = 1.5;
+beta = 0.02;
+
+% Spectral subtraction
+cleanMagnitude = max( ...
+    magnitudeSTFT - alpha * noiseProfile, ...
+    beta * magnitudeSTFT);
+
+% Reconstruct complex spectrum
+cleanSTFT = cleanMagnitude .* exp(1i * phaseSTFT);
+
+%% 7. INVERSE STFT
+
+cleanVoice = istft(cleanSTFT, fs, ...
+    'Window', win, ...
+    'OverlapLength', overlapLength, ...
+    'FFTLength', fftLength);
+
+cleanVoice = cleanVoice(:);
+
+% Match original signal length
+if length(cleanVoice) > N
+    cleanVoice = cleanVoice(1:N);
+elseif length(cleanVoice) < N
+    cleanVoice(end+1:N) = 0;
+end
+
+% Normalize output
+cleanVoice = cleanVoice / (max(abs(cleanVoice)) + eps);
+
+%% 8. ENHANCED VOICE ANALYSIS
+
+cleanPeak = max(abs(cleanVoice));
+
+cleanRMS = sqrt(mean(cleanVoice.^2));
+
+zcrClean = calculateZCR(cleanVoice, ...
+    frameLength, hopLength);
+
+fprintf('\n===== ENHANCED VOICE ANALYSIS =====\n');
+fprintf('Peak Amplitude: %.4f\n', cleanPeak);
+fprintf('RMS Amplitude: %.4f\n', cleanRMS);
+fprintf('Average ZCR: %.4f\n', mean(zcrClean));
+
+%% 9. WAVEFORM COMPARISON
+
+figure('Name', 'Voice Waveform Analysis');
+
+subplot(2,1,1);
+plot(time, x);
+title('Original Noisy Voice');
+xlabel('Time (seconds)');
+ylabel('Amplitude');
+grid on;
+
+subplot(2,1,2);
+plot(time, cleanVoice);
+title('Noise Reduced Voice');
+xlabel('Time (seconds)');
+ylabel('Amplitude');
+grid on;
+
+%% 10. FREQUENCY SPECTRUM
+
+figure('Name', 'Frequency Analysis');
+
+plot(frequency, magnitude);
+title('Original Voice Frequency Spectrum');
+xlabel('Frequency (Hz)');
+ylabel('Magnitude');
+grid on;
+xlim([0 fs/2]);
+
+%% 11. SPECTROGRAM COMPARISON
+
+figure('Name', 'Spectrogram Analysis');
+
+subplot(2,1,1);
+spectrogram(x, win, overlapLength, fftLength, fs, 'yaxis');
+title('Original Voice Spectrogram');
+colorbar;
+
+subplot(2,1,2);
+spectrogram(cleanVoice, win, overlapLength, fftLength, fs, 'yaxis');
+title('Enhanced Voice Spectrogram');
+colorbar;
+
+%% 12. RMS COMPARISON
+
+figure('Name', 'Amplitude Comparison');
+
+bar([rmsAmplitude, cleanRMS]);
+
+set(gca, 'XTickLabel', {'Original Voice', 'Enhanced Voice'});
+ylabel('RMS Amplitude');
+title('RMS Amplitude Comparison');
+grid on;
+
+%% 13. SAVE OUTPUT
+
+audiowrite('clean_voice.wav', cleanVoice, fs);
+
+disp(' ');
+disp('Voice analysis completed successfully!');
+disp('Enhanced audio saved as clean_voice.wav');
+
+%% 14. PLAY AUDIO
+
+disp('Playing original voice...');
+soundsc(x, fs);
+
+pause(duration + 1);
+
+disp('Playing enhanced voice...');
+soundsc(cleanVoice, fs);
+
+%% LOCAL FUNCTION: ZERO CROSSING RATE
+
+function zcr = calculateZCR(signal, frameLength, hopLength)
+
+    totalFrames = floor((length(signal)-frameLength)/hopLength)+1;
+
+    zcr = zeros(totalFrames,1);
+
+    for k = 1:totalFrames
+
+        startIndex = (k-1)*hopLength + 1;
+
+        frame = signal(startIndex:startIndex+frameLength-1);
+
+        crossings = sum(abs(diff(sign(frame))) > 0);
+
+        zcr(k) = crossings / (2*frameLength);
+
+    end
+
+end
